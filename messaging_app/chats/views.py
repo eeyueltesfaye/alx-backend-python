@@ -1,96 +1,53 @@
-from rest_framework import viewsets, permissions
-from rest_framework.decorators import action
+from rest_framework import viewsets, status
 from rest_framework.response import Response
-from .models import User, Message, Conversation
-from .serializers import UserSerializer, MessageSerializer, ConversationSerializer
-
-
-class UserViewSet(viewsets.ModelViewSet):
-    queryset = User.objects.all().order_by('-created_at')
-    serializer_class = UserSerializer
-    permission_classes = [permissions.IsAuthenticated]
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import NotFound
+from rest_framework.status import HTTP_403_FORBIDDEN
+from .models import Message, Conversation
+from .serializers import MessageSerializer, ConversationSerializer
+from .permissions import IsAuthenticatedAndParticipant
+from .pagination import CustomPagination
 
 
 class MessageViewSet(viewsets.ModelViewSet):
-    queryset = Message.objects.all().order_by('conversation', '-sent_at')
     serializer_class = MessageSerializer
+    permission_classes = [IsAuthenticated, IsAuthenticatedAndParticipant]
+    pagination_class = CustomPagination
 
-    @action(methods=['get'], detail=False)
-    def get_all(self, request):
-        messages = Message.objects.all().order_by('-sent_at')
-        serializer = MessageSerializer(messages, many=True)
+    def get_queryset(self):
+        conversation_id = self.request.query_params.get('conversation_id')
+        if not conversation_id:
+            raise NotFound("conversation_id query parameter is required.")
 
-        return Response(serializer.data)
-    
-    @action(methods=['get'], detail=True)
-    def get_conversation(self, request, pk=None):
-        conversation = Conversation.objects.filter(pk=pk).first()
-        if not conversation:
-            return Response({'Error': 'Conversation not exists.'}, status=404)
-        
-        messages = Message.objects.filter(conversation=conversation).order_by('-sent_at')
-        serializer = MessageSerializer(messages, many=True)
+        try:
+            conversation = Conversation.objects.get(id=conversation_id)
+        except Conversation.DoesNotExist:
+            raise NotFound("Conversation does not exist.")
 
-        return Response(serializer.data)
+        if self.request.user not in conversation.participants.all():
+            return Response({"detail": "You do not have permission to view messages in this conversation."},
+                            status=HTTP_403_FORBIDDEN)
 
-    @action(methods=['POST'], detail=False)
-    def _create(self, request):
-        sender_id = request.data.get('sender')
-        conversation_id = request.data.get('conversation')
-        message_body = request.data.get('message_body')
+        return Message.objects.filter(conversation=conversation).order_by('-timestamp')
 
-        if not all([sender_id, conversation_id, message_body]):
-            return Response({'Error': 'All fields are required.'}, status=400)
-        
-        sender = User.objects.filter(pk=sender_id).first()
-        conversation = Conversation.objects.filter(pk=conversation_id).first()
-        if not all([sender, conversation]):
-            return Response({'Error': 'Sender or conversation not exists.'}, status=404)
-        
-        message = Message.objects.create(sender=sender, conversation=conversation, message_body=message_body)
-        dto = self.get_serializer(message).data
+    def perform_create(self, serializer):
+        conversation_id = self.request.data.get('conversation_id')
+        try:
+            conversation = Conversation.objects.get(id=conversation_id)
+        except Conversation.DoesNotExist:
+            raise NotFound("Conversation does not exist.")
 
-        return Response(dto, status=201)
+        if self.request.user not in conversation.participants.all():
+            raise Response({"detail": "You do not have permission to send messages in this conversation."},
+                           status=HTTP_403_FORBIDDEN)
+
+        serializer.save(sender=self.request.user, conversation=conversation)
 
 
 class ConversationViewSet(viewsets.ModelViewSet):
-    queryset = Conversation.objects.all().order_by('-created_at')
+    queryset = Conversation.objects.all()
     serializer_class = ConversationSerializer
+    permission_classes = [IsAuthenticated]
 
-    def get_serializer_context(self):
-        """
-        Include the request in the context for serializers.
-        """
-        context = super().get_serializer_context()
-        context['request'] = self.request
-        return context
-
-    @action(methods=['get'], detail=False)
-    def get_all(self, request):
-        conversations = Conversation.objects.all().order_by('-created_at')
-        serializer = ConversationSerializer(conversations, many=True)
-
-        return Response(serializer.data)
-
-    @action(methods=['POST'], detail=False)
-    def _create(self, request):
-        participants_ids = request.data.get('participants', [])
-
-        filters = {
-            'participants': participants_ids,
-        }
-
-        if not filters['participants']:
-            return Response({'Error': 'This field is required.'}, status=400)
-        if not participants_ids or len(participants_ids) < 2:
-            return Response({'Error': 'At least 2 participants are required.'}, status=400)
-        
-        participants = User.objects.filter(pk__in=participants_ids)
-        if len(participants) != len(participants_ids):
-            return Response({'Error': 'Some or all users not exists'}, status=404)
-        
-        conversation = Conversation.objects.create(title=request.data.get('title'))
-        conversation.participants.set(participants)
-        dto = self.get_serializer(conversation).data
-
-        return Response(dto, status=201)
+    def get_queryset(self):
+        return Conversation.objects.filter(participants=self.request.user)
