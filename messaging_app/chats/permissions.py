@@ -2,8 +2,15 @@ from rest_framework import permissions
 
 class IsOwner(permissions.BasePermission):
     """
-    Custom permission to only allow users to view/edit their own conversations or messages.
+    Custom permission to only allow authenticated users to view/edit their own conversations or messages.
     """
 
     def has_object_permission(self, request, view, obj):
-        return obj.user == request.user or getattr(obj, 'conversation', None) and obj.conversation.user == request.user
+        # Check if the user is authenticated first
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Then check ownership
+        return obj.user == request.user or (
+            hasattr(obj, 'conversation') and obj.conversation.user == request.user
+        )
