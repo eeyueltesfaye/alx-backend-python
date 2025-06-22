@@ -1,9 +1,48 @@
 import logging
+from datetime import datetime
 import time
-from collections import defaultdict
-from datetime import datetime, time
-
 from django.http import HttpResponseForbidden, JsonResponse
+
+
+class RequestLoggingMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        logging.basicConfig(filename='requests.log', level=logging.INFO)
+
+    def __call__(self, request):
+        user = request.user if request.user.is_authenticated else "Anonymous"
+        log_msg = f"{datetime.now()} - User: {user} - Path: {request.path}"
+        logging.info(log_msg)
+        return self.get_response(request)
+
+
+class RestrictAccessByTimeMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        current_hour = datetime.now().hour
+        if request.path.startswith("/api/") and (current_hour < 6 or current_hour > 21):
+            return HttpResponseForbidden("Chat access is only allowed between 6 AM and 9 PM.")
+        return self.get_response(request)
+
+
+class OffensiveLanguageMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.message_logs = {}  # IP: [timestamp1, timestamp2, ...]
+
+    def __call__(self, request):
+        if request.method == 'POST' and request.path.startswith('/api/messages'):
+            ip = request.META.get('REMOTE_ADDR', 'unknown')
+            now = time.time()
+            self.message_logs.setdefault(ip, [])
+            # Keep only timestamps within the last 60 seconds
+            self.message_logs[ip] = [t for t in self.message_logs[ip] if now - t < 60]
+            if len(self.message_logs[ip]) >= 5:
+                return JsonResponse({'error': 'Message limit exceeded (5 per minute)'}, status=429)
+            self.message_logs[ip].append(now)
+        return self.get_response(request)
 
 
 class RolepermissionMiddleware:
@@ -11,86 +50,8 @@ class RolepermissionMiddleware:
         self.get_response = get_response
 
     def __call__(self, request):
-        # Only check role for authenticated users
-        user = getattr(request, 'user', None)
-        if user and user.is_authenticated:
-            # Replace with actual check for role if you're using a custom user model or role field
-            role = getattr(user, 'role', None)
-
-            if role not in ['admin', 'moderator']:
-                return JsonResponse(
-                    {"error": "Access forbidden: Admins or moderators only."},
-                    status=403
-                )
-
+        if request.path.startswith('/api/messages'):
+            user = request.user
+            if not user.is_authenticated or not user.groups.filter(name__in=['admin', 'moderator']).exists():
+                return HttpResponseForbidden("Only admins and moderators can access this endpoint.")
         return self.get_response(request)
-
-
-class OffensiveLanguageMiddleware:
-    def __init__(self, get_response):
-        self.get_response = get_response
-        self.requests = defaultdict(list)  # Stores request timestamps per IP
-        self.limit = 5  # messages
-        self.window = 60  # seconds
-
-    def __call__(self, request):
-        # Apply rate limiting only to POST requests to messages endpoint
-        if request.method == "POST" and request.path.startswith("/api/messages/"):
-            ip = self.get_client_ip(request)
-            now = time.time()
-
-            # Keep only timestamps within the last 60 seconds
-            self.requests[ip] = [t for t in self.requests[ip] if now - t < self.window]
-
-            if len(self.requests[ip]) >= self.limit:
-                return JsonResponse(
-                    {"error": "Rate limit exceeded: Only 5 messages allowed per minute."},
-                    status=429
-                )
-
-            # Store this request's timestamp
-            self.requests[ip].append(now)
-
-        return self.get_response(request)
-
-    def get_client_ip(self, request):
-        x_forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
-        if x_forwarded_for:
-            return x_forwarded_for.split(',')[0]
-        return request.META.get("REMOTE_ADDR", "")
-
-class RestrictAccessByTimeMiddleware:
-    def __init__(self, get_response):
-        self.get_response = get_response
-
-    def __call__(self, request):
-        current_time = datetime.now().time()
-
-        # Define allowed access window: between 6PM and 9PM
-        start_time = time(18, 0)  # 6:00 PM
-        end_time = time(21, 0)  # 9:00 PM
-
-        # Restrict access if outside the window
-        if not (start_time <= current_time <= end_time):
-            if request.path.startswith("/api/messages/") or request.path.startswith("/api/conversations/"):
-                return HttpResponseForbidden("Access to chat is only allowed between 6PM and 9PM.")
-
-        return self.get_response(request)
-
-class RequestLoggingMiddleware:
-    def __init__(self, get_response):
-        self.get_response = get_response
-        # Configure logger
-        self.logger = logging.getLogger("request_logger")
-        handler = logging.FileHandler("requests.log")
-        formatter = logging.Formatter('%(message)s')
-        handler.setFormatter(formatter)
-        self.logger.setLevel(logging.INFO)
-        self.logger.addHandler(handler)
-
-    def __call__(self, request):
-        user = request.user if request.user.is_authenticated else "Anonymous"
-        self.logger.info(f"{datetime.now()} - User: {user} - Path: {request.path}")
-
-        response = self.get_response(request)
-        return response
