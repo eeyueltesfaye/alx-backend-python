@@ -1,0 +1,5 @@
+#!/bin/bash
+kubectl scale deployment django-app --replicas=3
+kubectl get pods
+kubectl top pods
+wrk http://<minikube-ip>  # Optional, for load testing
